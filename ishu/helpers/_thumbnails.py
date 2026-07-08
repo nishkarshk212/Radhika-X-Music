@@ -32,8 +32,9 @@ def safe_font(path, size):
 class Thumbnail:
     def __init__(self):
         self.size = (1280, 720)
-        self.font_title = safe_font(FONT_TITLE_PATH, 26)
+        self.font_title = safe_font(FONT_TITLE_PATH, 32)
         self.font_info = safe_font(FONT_INFO_PATH, 20)
+        self.font_watermark = safe_font(FONT_TITLE_PATH, 24)
 
     async def start(self):
         os.makedirs("cache", exist_ok=True)
@@ -102,56 +103,64 @@ class Thumbnail:
                 bg = src.crop((0, offset, src.width, offset + new_h))
 
             bg = bg.resize((W, H), Image.Resampling.LANCZOS)
-            bg = bg.filter(ImageFilter.GaussianBlur(25))
+            bg = bg.filter(ImageFilter.GaussianBlur(35))
 
             # Darken slightly
-            bg_overlay = Image.new("RGBA", (W, H), (0, 0, 0, 100))
+            bg_overlay = Image.new("RGBA", (W, H), (0, 0, 0, 120))
             bg = Image.alpha_composite(bg, bg_overlay)
 
-            # 2. LOAD TEMPLATE & extract UI with soft alpha
-            if os.path.exists(TEMPLATE_PATH):
-                tpl = Image.open(TEMPLATE_PATH).convert("RGBA")
-                tpl = tpl.resize((W, H), Image.Resampling.LANCZOS)
-
-                tpl_arr = np.array(tpl).astype(float)
-                r, g, b = tpl_arr[:,:,0], tpl_arr[:,:,1], tpl_arr[:,:,2]
-
-                d_bg = np.maximum(np.maximum(np.abs(r - 147.5), np.abs(g - 147.5)), np.abs(b - 147.5))
-                alpha = np.clip((d_bg - 8) / 17.0 * 255, 0, 255)
-                alpha[:, :640] = 0
-
-                tpl_arr[:,:,3] = alpha
-                tpl = Image.fromarray(tpl_arr.astype(np.uint8))
-                
-                bg = Image.alpha_composite(bg, tpl)
-
-            # 3. PASTE COVER ART & DROP SHADOW
-            cover_x, cover_y = 100, 104
-            cover_w, cover_h = 512, 512
-            cover_radius = 38
-
-            shadow_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-            shadow_draw = ImageDraw.Draw(shadow_layer)
-            shadow_draw.rounded_rectangle(
-                (cover_x + 6, cover_y + 8, cover_x + cover_w + 6, cover_y + cover_h + 8),
-                radius=cover_radius + 4,
-                fill=(0, 0, 0, 140),
+            # 2. CREATE CARD in the center
+            card_w, card_h = 940, 580
+            card_x = (W - card_w) // 2
+            card_y = (H - card_h) // 2
+            card_radius = 45
+            
+            card_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+            card_draw = ImageDraw.Draw(card_layer)
+            card_draw.rounded_rectangle(
+                (card_x, card_y, card_x + card_w, card_y + card_h),
+                radius=card_radius,
+                fill=(235, 235, 235, 255)
             )
-            shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(18))
-            bg = Image.alpha_composite(bg, shadow_layer)
+            
+            bg = Image.alpha_composite(bg, card_layer)
 
-            cover_resized = src.resize((cover_w, cover_h), Image.Resampling.LANCZOS)
+            # 3. PASTE COVER ART inside the card
+            cover_margin = 35
+            cover_w = card_w - (cover_margin * 2) # 870
+            cover_h = 370
+            cover_x = card_x + cover_margin # 205
+            cover_y = card_y + cover_margin # 105
+            cover_radius = 25
+            
+            # Center crop the cover art to fit 870x370
+            target_ratio = cover_w / cover_h
+            src_ratio = src.width / src.height
+            if src_ratio > target_ratio:
+                new_w = int(src.height * target_ratio)
+                offset = (src.width - new_w) // 2
+                cover = src.crop((offset, 0, offset + new_w, src.height))
+            else:
+                new_h = int(src.width / target_ratio)
+                offset = (src.height - new_h) // 2
+                cover = src.crop((0, offset, src.width, offset + new_h))
+                
+            cover = cover.resize((cover_w, cover_h), Image.Resampling.LANCZOS)
+            
             cover_mask = Image.new("L", (cover_w, cover_h), 0)
             ImageDraw.Draw(cover_mask).rounded_rectangle(
                 (0, 0, cover_w, cover_h), radius=cover_radius, fill=255
             )
-            bg.paste(cover_resized, (cover_x, cover_y), cover_mask)
+            
+            bg.paste(cover, (cover_x, cover_y), cover_mask)
 
-            # 4. ADD TEXT 
+            # 4. ADD TEXT & PROGRESS BAR inside the card
             draw = ImageDraw.Draw(bg)
-            text_x = 715
-            text_max_w = 320
-
+            
+            title_x = cover_x
+            title_y = cover_y + cover_h + 20
+            max_title_w = cover_w
+            
             def ellipsize(s, font, max_w):
                 if draw.textbbox((0, 0), s, font=font)[2] <= max_w:
                     return s
@@ -167,14 +176,47 @@ class Thumbnail:
                         hi = mid - 1
                 return best
 
-            title_str = ellipsize(unidecode(str(song.title)), self.font_title, text_max_w)
-            title_y = cover_y + 12
-            draw.text((text_x, title_y), title_str, fill=(255, 255, 255, 255), font=self.font_title)
-
-            artist_str = ellipsize(unidecode(str(song.channel_name)), self.font_info, text_max_w + 60)
-            artist_y = title_y + 40
-            draw.text((text_x, artist_y), artist_str, fill=(200, 200, 200, 255), font=self.font_info)
+            title_str = ellipsize(unidecode(str(song.title)), self.font_title, max_title_w)
+            draw.text((title_x, title_y), title_str, fill=(18, 18, 18, 255), font=self.font_title)
             
+            subtitle_str = f"{song.channel_name}  •  {song.view_count}" if song.view_count else str(song.channel_name)
+            subtitle_str = ellipsize(unidecode(subtitle_str), self.font_info, max_title_w)
+            subtitle_y = title_y + 38
+            draw.text((title_x, subtitle_y), subtitle_str, fill=(110, 110, 110, 255), font=self.font_info)
+            
+            bar_y = subtitle_y + 38
+            bar_h = 6
+            bar_radius = 3
+            draw.rounded_rectangle(
+                (cover_x, bar_y, cover_x + cover_w, bar_y + bar_h),
+                radius=bar_radius,
+                fill=(210, 210, 210, 255)
+            )
+            
+            # Show a fixed progress (e.g. 35%) representing play onset visual mockup
+            active_percentage = 0.35
+            active_w = int(cover_w * active_percentage)
+            draw.rounded_rectangle(
+                (cover_x, bar_y, cover_x + active_w, bar_y + bar_h),
+                radius=bar_radius,
+                fill=(235, 50, 50, 255)
+            )
+            
+            time_y = bar_y + 12
+            draw.text((cover_x, time_y), "0:00", fill=(100, 100, 100, 255), font=self.font_info)
+            duration_str = str(song.duration)
+            duration_w = draw.textbbox((0, 0), duration_str, font=self.font_info)[2]
+            draw.text((cover_x + cover_w - duration_w, time_y), duration_str, fill=(100, 100, 100, 255), font=self.font_info)
+
+            # 5. WATERMARK TEXT
+            watermark_text = "[ BILLU BADMOSH ]"
+            watermark_w = draw.textbbox((0, 0), watermark_text, font=self.font_watermark)[2]
+            watermark_x = W - watermark_w - 45
+            watermark_y = 35
+            
+            draw.text((watermark_x + 2, watermark_y + 2), watermark_text, fill=(0, 0, 0, 150), font=self.font_watermark)
+            draw.text((watermark_x, watermark_y), watermark_text, fill=(255, 255, 255, 255), font=self.font_watermark)
+
             out = bg.convert("RGB")
             out.save(final_path, "PNG")
 
