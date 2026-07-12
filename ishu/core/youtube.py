@@ -52,13 +52,16 @@ def _ssl_context() -> ssl.SSLContext:
 def cookie_txt_file() -> str | None:
     """
     Return a random cookie .txt file path.
-    Searches both the cwd-relative ``cookies/`` folder and the package's
-    ``ishu/cookies/`` folder (where COOKIE_B64 is decoded at boot).
+    Searches the package's ``ishu/cookies/`` directory (where COOKIE_B64 is
+    decoded at boot) as well as a cwd-relative ``cookies/`` directory.
     """
     try:
+        # ishu/core/youtube.py -> ishu/cookies
+        pkg_cookies = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cookies"
+        )
         candidates = []
-        for base in (os.getcwd(), os.path.dirname(__file__)):
-            folder = os.path.join(base, "cookies")
+        for folder in (os.path.join(os.getcwd(), "cookies"), pkg_cookies):
             candidates.extend(glob.glob(os.path.join(folder, "*.txt")))
         txt_files = [p for p in candidates if os.path.basename(p) != "README.md"]
         if not txt_files:
