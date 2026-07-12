@@ -419,7 +419,15 @@ async def _download_with_fallback(
     """
     video_id = _extract_video_id(link) or link
 
-    # 0. SaaS YouTube backend
+    # 0. LOCAL yt-dlp with COOKIE_B64  ← PRIMARY on this VPS.
+    #    The SaaS/Railway stream URLs are IP-pinned to EC2's egress (13.61.0.2)
+    #    and this host's egress IP is Google-blocklisted, so those paths always
+    #    403 here. Local yt-dlp with fresh cookies is the only reliable path.
+    result = await _ytdlp_download(link, media_type)
+    if result:
+        return result, "ytdlp"
+
+    # 1. SaaS YouTube backend (works only when egressing from EC2 / clean IP)
     try:
         from ishu.core.saas import saas_download
         result = await saas_download(video_id, video=(media_type == "video"))
@@ -428,25 +436,20 @@ async def _download_with_fallback(
     except Exception as exc:
         logger.warning("SaaS backend failed for %s: %s", video_id, exc)
 
-    # 1. Railway YT API
+    # 2. Railway YT API
     result = await _railway_download(video_id, media_type)
     if result:
         return result, "railway"
 
-    # 2. Shruti
+    # 3. Shruti
     result = await _shruti_download(video_id, media_type)
     if result:
         return result, "shruti"
 
-    # 3. xBit
+    # 4. xBit
     result = await _xbit_download(link, media_type)
     if result:
         return result, "xbit"
-
-    # 4. yt-dlp
-    result = await _ytdlp_download(link, media_type)
-    if result:
-        return result, "ytdlp"
 
     logger.error("All download methods failed for: %s", video_id)
     return None, "none"
