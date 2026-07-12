@@ -13,6 +13,7 @@ import glob
 import os
 import random
 import re
+import ssl
 import time as _time
 from typing import Union
 
@@ -31,11 +32,20 @@ SHRUTI_API_KEY      = getattr(config, "SHRUTI_API_KEY",      None)
 
 RAILWAY_YT_API_URL  = getattr(config, "RAILWAY_YT_API_URL",  None)
 RAILWAY_YT_API_KEY  = getattr(config, "RAILWAY_YT_API_KEY",  None)
+RAILWAY_RETRIES     = getattr(config, "RAILWAY_RETRIES",     3)
 
 YTPROXY_URL         = getattr(config, "YTPROXY_URL",         None)
 YT_API_KEY          = getattr(config, "YT_API_KEY",          None)
 
 DOWNLOAD_DIR        = "downloads"
+
+
+def _ssl_context() -> ssl.SSLContext:
+    """SSL context that ignores certificate errors (mirrors other forks)."""
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
 
 
 # ── Cookie helper ─────────────────────────────────────────────────────────────
@@ -134,10 +144,12 @@ async def _shruti_download(video_id: str, media_type: str) -> str | None:
 async def _railway_download(video_id: str, media_type: str) -> str | None:
     """
     Download via Railway self-hosted YouTube API.
-    GET {RAILWAY_YT_API_URL}/audio?id=<video_id>  →  audio.best_audio.url
-    GET {RAILWAY_YT_API_URL}/video/hq?id=<video_id> (tried first for video)
-    GET {RAILWAY_YT_API_URL}/video?id=<video_id> (fallback)
-    Then streams the direct googlevideo URL to local file.
+    GET {RAILWAY_YT_API_URL}/download?id=<video_id>&type=audio|video
+        header: X-API-Key: <key>
+        → {"success": true, "download": {"best_audio_url": ..., "best_video_url": ...}}
+    Then stream the returned googlevideo URL to local file.
+    The proxy backend is intermittently IP-blocked by Google, so we retry the
+    whole fetch+stream a few times -- a fresh call often yields a working URL.
     Returns local file path on success, None on failure.
     """
     if not RAILWAY_YT_API_URL or not RAILWAY_YT_API_KEY:
@@ -152,30 +164,79 @@ async def _railway_download(video_id: str, media_type: str) -> str | None:
         return file_path
 
     headers = {
+        "X-API-Key": str(RAILWAY_YT_API_KEY),
+        "Content-Type": "application/json",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     }
-    # For video, try /play/video/hq first, then /play/video; for audio just /play/audio
-    endpoints = ["play/video/hq", "play/video"] if media_type == "video" else ["play/audio"]
 
+    # Build a session once; reuse for both the metadata call and the stream.
+    ssl_ctx = _ssl_context()
     try:
         async with aiohttp.ClientSession(headers=headers) as session:
-            for endpoint in endpoints:
-                # Step 1 — stream direct bytes from Railway API
-                async with session.get(
-                    f"{RAILWAY_YT_API_URL}/{endpoint}",
-                    params={"id": video_id, "api_key": str(RAILWAY_YT_API_KEY)},
-                    timeout=aiohttp.ClientTimeout(total=timeout_dl),
-                ) as resp:
-                    if resp.status == 200:
-                        with open(file_path, "wb") as fobj:
-                            async for chunk in resp.content.iter_chunked(1024 * 1024):
-                                fobj.write(chunk)
-                        
-                        if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-                            logger.info("Railway YT API ✓ %s → %s", video_id, file_path)
-                            return file_path
-                    else:
-                        logger.warning("Railway YT API /%s status %s", endpoint, resp.status)
+            for attempt in range(RAILWAY_RETRIES):
+                try:
+                    # Step 1 — resolve the direct stream URL from the proxy
+                    async with session.get(
+                        f"{RAILWAY_YT_API_URL}/download",
+                        params={"id": video_id, "type": media_type},
+                        timeout=aiohttp.ClientTimeout(total=40),
+                        ssl=ssl_ctx,
+                    ) as resp:
+                        if resp.status != 200:
+                            logger.warning(
+                                "Railway YT API status %s (attempt %d)", resp.status, attempt + 1
+                            )
+                            continue
+                        try:
+                            data = await resp.json(content_type=None)
+                        except Exception as e:
+                            logger.warning("Railway YT API bad JSON: %s", e)
+                            continue
+
+                        if not data.get("success"):
+                            logger.warning(
+                                "Railway YT API success=false: %s", str(data)[:160]
+                            )
+                            continue
+
+                        dl  = data.get("download", {})
+                        url = dl.get("best_audio_url") or dl.get("best_video_url")
+                        if not url:
+                            logger.warning("Railway YT API returned no URL")
+                            continue
+
+                    # Step 2 — stream the googlevideo URL to disk (GET, not HEAD)
+                    async with session.get(
+                        url,
+                        timeout=aiohttp.ClientTimeout(total=timeout_dl),
+                        ssl=ssl_ctx,
+                    ) as stream:
+                        if stream.status == 200:
+                            with open(file_path, "wb") as fobj:
+                                async for chunk in stream.content.iter_chunked(1024 * 1024):
+                                    fobj.write(chunk)
+                            if os.path.exists(file_path) and os.path.getsize(file_path) > 1024:
+                                logger.info("Railway YT API ✓ %s → %s", video_id, file_path)
+                                return file_path
+                            if os.path.exists(file_path):
+                                try:
+                                    os.remove(file_path)
+                                except OSError:
+                                    pass
+                        else:
+                            logger.warning(
+                                "Railway stream status %s (attempt %d)", stream.status, attempt + 1
+                            )
+                except Exception as exc:
+                    logger.warning(
+                        "Railway YT API attempt %d error for %s: %s",
+                        attempt + 1, video_id, exc,
+                    )
+                    try:
+                        if os.path.exists(file_path):
+                            os.remove(file_path)
+                    except OSError:
+                        pass
             return None
 
     except Exception as exc:

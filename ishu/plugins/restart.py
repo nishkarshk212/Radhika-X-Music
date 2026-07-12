@@ -10,7 +10,7 @@ import asyncio
 
 from pyrogram import filters, types
 
-from ishu import app, db, lang, stop
+from ishu import app, config, db, lang, stop
 
 
 @app.on_message(filters.command(["logs"]) & app.sudoers)
@@ -64,29 +64,39 @@ async def _restart(_, m: types.Message):
 @app.on_message(filters.command(["update"]) & app.sudoers)
 @lang.language()
 async def _update(_, m: types.Message):
-    sent = await m.reply_text("Checking for updates from git repository...")
+    # Owner only: git pull + auto restart
+    if m.from_user.id != config.OWNER_ID:
+        return await m.reply_text("This command is restricted to the bot owner.")
+
+    sent = await m.reply_text("Updating from git repository...")
     try:
         proc = await asyncio.create_subprocess_shell(
-            "git pull",
+            "git fetch origin && git reset --hard origin/main",
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await proc.communicate()
         output = (stdout.decode().strip() + "\n" + stderr.decode().strip()).strip()
-        
-        if "Already up to date." in output:
-            return await sent.edit_text("The bot is already up to date!")
-            
-        await sent.edit_text(f"Successfully pulled updates:\n```{output}```\nRestarting bot...")
-        
+
+        if proc.returncode != 0:
+            return await sent.edit_text(
+                f"Git update failed (exit {proc.returncode}):\n`{output[:1500]}`"
+            )
+
+        await sent.edit_text(
+            f"Updated from git:\n```{output[-800:]}```\nRestarting bot..."
+        )
+
         for directory in ["cache", "downloads"]:
             shutil.rmtree(directory, ignore_errors=True)
-            
+
         task = asyncio.create_task(stop())
         await task
 
-        try: os.remove("log.txt")
-        except Exception: pass
+        try:
+            os.remove("log.txt")
+        except Exception:
+            pass
 
         os.execl(sys.executable, sys.executable, "-m", "ishu")
     except Exception as e:

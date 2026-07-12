@@ -1,6 +1,7 @@
 import asyncio
 import signal
 import importlib
+import os
 from contextlib import suppress
 
 from ishu import (
@@ -46,6 +47,20 @@ async def main():
 
     if config.COOKIES_URL:
         await yt.save_cookies(config.COOKIES_URL)
+
+    # Materialize the base64 cookie (from COOKIE_B64 env) into ishu/cookies/
+    if config.COOKIE_B64:
+        try:
+            import base64
+            cookie_dir = os.path.join(os.path.dirname(__file__), "cookies")
+            os.makedirs(cookie_dir, exist_ok=True)
+            raw = base64.b64decode(config.COOKIE_B64)
+            cpath = os.path.join(cookie_dir, "cookie_env.txt")
+            with open(cpath, "wb") as _f:
+                _f.write(raw)
+            logger.info("Decoded COOKIE_B64 → %s", cpath)
+        except Exception as exc:
+            logger.warning("Failed to decode COOKIE_B64: %s", exc)
 
     sudoers = await db.get_sudoers()
     app.sudoers.update(sudoers)
