@@ -43,8 +43,16 @@ class Config:
         self.SAAS_API_URL = getenv(
             "SAAS_API_URL", "https://youtube-api-saas-backend.onrender.com"
         )
-        self.SAAS_API_KEY = getenv("SAAS_API_KEY", "lily_enRzhkbmCWgWe8QUnrlRq8EsuUfyo")
+        self.SAAS_API_KEY = getenv("SAAS_API_KEY", "lily_enRzhkbmCWgWe8QUnrlRq8EsuUfYo")
         self.SAAS_RETRIES = int(getenv("SAAS_RETRIES", "3"))
+
+        # EC2 self-hosted YouTube API — PRIMARY downloader. Its /play/* endpoints
+        # stream bytes from EC2's trusted egress IP, bypassing this VPS IP being
+        # Google-blocklisted for googlevideo media.
+        self.EC2_API_URL = getenv("EC2_API_URL", "http://13.61.0.2:8000")
+        self.EC2_API_KEY = getenv("EC2_API_KEY", "")
+        self.EC2_RETRIES = int(getenv("EC2_RETRIES", "3"))
+        self.EC2_TIMEOUT = int(getenv("EC2_TIMEOUT", "600"))
 
         # Shruti API — Primary download source (get key from @SHRUTIAPIBOT)
         self.SHRUTI_API_URL = getenv("SHRUTI_API_URL", "http://api01.shrutibots.site")
