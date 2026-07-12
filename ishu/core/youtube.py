@@ -3,10 +3,13 @@
 # This file is part of AnonXMusic
 #
 # Download chain:
-#   1. Railway YT API  (RAILWAY_YT_API_URL / RAILWAY_YT_API_KEY)
-#   2. Shruti API      (SHRUTI_API_URL / SHRUTI_API_KEY)
-#   3. xBit API        (YTPROXY_URL / YT_API_KEY)
-#   4. yt-dlp          (local, last resort)
+#   1. EC2 self-hosted API  (EC2_API_URL / EC2_API_KEY)  — PRIMARY; streams bytes
+#      from EC2's trusted egress IP, bypassing this VPS IP being Google-blocklisted.
+#   2. yt-dlp (local, COOKIE_B64)                         — cookie fallback
+#   3. SaaS YouTube backend   (SAAS_API_URL / SAAS_API_KEY)
+#   4. Railway YT API         (RAILWAY_YT_API_URL / RAILWAY_YT_API_KEY)
+#   5. Shruti API             (SHRUTI_API_URL / SHRUTI_API_KEY)
+#   6. xBit API               (YTPROXY_URL / YT_API_KEY)
 
 import asyncio
 import glob
@@ -37,6 +40,15 @@ RAILWAY_RETRIES     = getattr(config, "RAILWAY_RETRIES",     3)
 YTPROXY_URL         = getattr(config, "YTPROXY_URL",         None)
 YT_API_KEY          = getattr(config, "YT_API_KEY",          None)
 
+# Primary downloader: EC2 self-hosted API. Its /play/* endpoints stream the
+# media bytes FROM EC2's own egress IP, which YouTube trusts for the pinned
+# googlevideo URL. This bypasses the VPS egress IP being Google-blocklisted
+# (every other path 403s here). Cookies live on EC2 (/app/cookies.txt).
+EC2_API_URL         = getattr(config, "EC2_API_URL",         "http://13.61.0.2:8000")
+EC2_API_KEY         = getattr(config, "EC2_API_KEY",         None)
+EC2_RETRIES         = getattr(config, "EC2_RETRIES",         3)
+EC2_TIMEOUT         = getattr(config, "EC2_TIMEOUT",         600)
+
 DOWNLOAD_DIR        = "downloads"
 
 
@@ -46,6 +58,78 @@ def _ssl_context() -> ssl.SSLContext:
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
     return ctx
+
+
+# ── Downloader 0: EC2 self-hosted API (PRIMARY) ──────────────────────────────
+async def _ec2_download(link: str, media_type: str) -> str | None:
+    """
+    Download via the self-hosted EC2 YouTube API. Its /play/* endpoints fetch
+    the media server-side and stream the bytes back FROM EC2's egress IP, which
+    YouTube trusts for the IP-pinned googlevideo URL. This is the only path that
+    works from a Google-blocklisted VPS egress IP.
+
+    GET {EC2_API_URL}/play/audio?id=<vid>&key=<EC2_API_KEY>  -> audio bytes
+    GET {EC2_API_URL}/play/video?id=<vid>&key=<EC2_API_KEY>  -> video bytes
+    """
+    if not EC2_API_KEY:
+        return None
+
+    video_id = _extract_video_id(link)
+    if not video_id or len(video_id) < 3:
+        return None
+
+    ext       = "mp4" if media_type == "video" else "mp3"
+    route     = "video" if media_type == "video" else "audio"
+    file_path = os.path.join(DOWNLOAD_DIR, f"{video_id}.{ext}")
+
+    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+    if os.path.exists(file_path) and os.path.getsize(file_path) > 1024:
+        return file_path
+
+    headers = {"X-API-Key": str(EC2_API_KEY)}
+    url = f"{EC2_API_URL}/play/{route}?id={video_id}"
+
+    try:
+        async with aiohttp.ClientSession(headers=headers) as session:
+            for attempt in range(EC2_RETRIES):
+                try:
+                    async with session.get(
+                        url,
+                        timeout=aiohttp.ClientTimeout(total=EC2_TIMEOUT),
+                        ssl=_ssl_context(),
+                    ) as resp:
+                        if resp.status == 200:
+                            with open(file_path, "wb") as fobj:
+                                async for chunk in resp.content.iter_chunked(1024 * 1024):
+                                    fobj.write(chunk)
+                            if os.path.exists(file_path) and os.path.getsize(file_path) > 1024:
+                                logger.info("EC2 API ✓ %s → %s", video_id, file_path)
+                                return file_path
+                            if os.path.exists(file_path):
+                                os.remove(file_path)
+                        else:
+                            logger.warning(
+                                "EC2 API status %s (attempt %d)", resp.status, attempt + 1
+                            )
+                except Exception as exc:
+                    logger.warning(
+                        "EC2 API attempt %d error for %s: %s",
+                        attempt + 1, video_id, exc,
+                    )
+                    if os.path.exists(file_path):
+                        try:
+                            os.remove(file_path)
+                        except OSError:
+                            pass
+            return None
+    except Exception as exc:
+        logger.warning("EC2 API download failed for %s: %s", video_id, exc)
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
+        return None
 
 
 # ── Cookie helper ─────────────────────────────────────────────────────────────
@@ -419,15 +503,19 @@ async def _download_with_fallback(
     """
     video_id = _extract_video_id(link) or link
 
-    # 0. LOCAL yt-dlp with COOKIE_B64  ← PRIMARY on this VPS.
-    #    The SaaS/Railway stream URLs are IP-pinned to EC2's egress (13.61.0.2)
-    #    and this host's egress IP is Google-blocklisted, so those paths always
-    #    403 here. Local yt-dlp with fresh cookies is the only reliable path.
+    # 0. EC2 self-hosted API  ← PRIMARY. Streams bytes from EC2's trusted egress
+    #    IP, bypassing this VPS IP being Google-blocklisted for googlevideo.
+    result = await _ec2_download(link, media_type)
+    if result:
+        return result, "ec2"
+
+    # 1. LOCAL yt-dlp with COOKIE_B64  (cookie fallback; works when egress IP
+    #    is clean / YouTube isn't challenging this host for the media CDN).
     result = await _ytdlp_download(link, media_type)
     if result:
         return result, "ytdlp"
 
-    # 1. SaaS YouTube backend (works only when egressing from EC2 / clean IP)
+    # 2. SaaS YouTube backend (works only when egressing from EC2 / clean IP)
     try:
         from ishu.core.saas import saas_download
         result = await saas_download(video_id, video=(media_type == "video"))
@@ -436,17 +524,17 @@ async def _download_with_fallback(
     except Exception as exc:
         logger.warning("SaaS backend failed for %s: %s", video_id, exc)
 
-    # 2. Railway YT API
+    # 3. Railway YT API
     result = await _railway_download(video_id, media_type)
     if result:
         return result, "railway"
 
-    # 3. Shruti
+    # 4. Shruti
     result = await _shruti_download(video_id, media_type)
     if result:
         return result, "shruti"
 
-    # 4. xBit
+    # 5. xBit
     result = await _xbit_download(link, media_type)
     if result:
         return result, "xbit"
