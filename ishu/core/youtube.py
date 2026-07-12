@@ -410,6 +410,7 @@ async def _download_with_fallback(
 ) -> tuple[str | None, str]:
     """
     Try all downloaders in order:
+      0. SaaS YouTube backend (resolves fresh googlevideo URL; IP-pinned to EC2)
       1. Railway YT API
       2. Shruti API
       3. xBit API
@@ -417,6 +418,15 @@ async def _download_with_fallback(
     Returns (file_path, downloader_name)
     """
     video_id = _extract_video_id(link) or link
+
+    # 0. SaaS YouTube backend
+    try:
+        from ishu.core.saas import saas_download
+        result = await saas_download(video_id, video=(media_type == "video"))
+        if result:
+            return result, "saas"
+    except Exception as exc:
+        logger.warning("SaaS backend failed for %s: %s", video_id, exc)
 
     # 1. Railway YT API
     result = await _railway_download(video_id, media_type)

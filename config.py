@@ -39,6 +39,13 @@ class Config:
         # Base64-encoded Netscape cookie file (decoded to ishu/cookies at boot).
         self.COOKIE_B64 = getenv("COOKIE_B64", "")
 
+        # SaaS YouTube backend (youtube-api-saas-backend.onrender.com)
+        self.SAAS_API_URL = getenv(
+            "SAAS_API_URL", "https://youtube-api-saas-backend.onrender.com"
+        )
+        self.SAAS_API_KEY = getenv("SAAS_API_KEY", "lily_enRzhkbmCWgWe8QUnrlRq8EsuUfyo")
+        self.SAAS_RETRIES = int(getenv("SAAS_RETRIES", "3"))
+
         # Shruti API — Primary download source (get key from @SHRUTIAPIBOT)
         self.SHRUTI_API_URL = getenv("SHRUTI_API_URL", "http://api01.shrutibots.site")
         self.SHRUTI_API_KEY = getenv("SHRUTI_API_KEY", "")
