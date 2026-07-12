@@ -50,17 +50,24 @@ def _ssl_context() -> ssl.SSLContext:
 
 # ── Cookie helper ─────────────────────────────────────────────────────────────
 def cookie_txt_file() -> str | None:
-    """Return a random cookie .txt file path from the cookies/ folder."""
+    """
+    Return a random cookie .txt file path.
+    Searches both the cwd-relative ``cookies/`` folder and the package's
+    ``ishu/cookies/`` folder (where COOKIE_B64 is decoded at boot).
+    """
     try:
-        folder    = os.path.join(os.getcwd(), "cookies")
-        txt_files = glob.glob(os.path.join(folder, "*.txt"))
+        candidates = []
+        for base in (os.getcwd(), os.path.dirname(__file__)):
+            folder = os.path.join(base, "cookies")
+            candidates.extend(glob.glob(os.path.join(folder, "*.txt")))
+        txt_files = [p for p in candidates if os.path.basename(p) != "README.md"]
         if not txt_files:
             return None
-        chosen   = random.choice(txt_files)
-        log_file = os.path.join(folder, "logs.csv")
+        chosen = random.choice(txt_files)
+        log_file = os.path.join(os.path.dirname(chosen), "logs.csv")
         with open(log_file, "a") as f:
             f.write(f"Chosen: {chosen}\n")
-        return f"cookies/{os.path.basename(chosen)}"
+        return chosen
     except Exception:
         return None
 
